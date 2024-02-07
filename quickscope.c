@@ -1,6 +1,7 @@
-#include <libnl3/netlink/netlink.h>
-#include <libnl3/netlink/genl/genl.h>
-#include <libnl3/netlink/genl/ctrl.h>
+#define _GNU_SOURCE
+#include <netlink/netlink.h>
+#include <netlink/genl/genl.h>
+#include <netlink/genl/ctrl.h>
 #include <net/if.h>
 #include <linux/nl80211.h>
 #include <stdio.h>
@@ -33,8 +34,6 @@ struct ieee80211_mgmt {
   uint8_t bssid[6];
   uint16_t seq_ctrl;
   uint8_t junk[12];
-  uint8_t tag_id;
-  uint8_t tag_len;
 };
 
 
@@ -87,7 +86,7 @@ int set_channel(int channel, char* interface) {
         NLA_PUT_U32(mesg, NL80211_ATTR_WIPHY_FREQ, freq);
         NLA_PUT_U32(mesg, NL80211_ATTR_CHANNEL_WIDTH, NL80211_CHAN_WIDTH_20);
         nl_cb_err(cb, NL_CB_CUSTOM, error_handler, &err);
-        rc = nl_send_auto(sk, mesg);
+        rc = nl_send_auto_complete(sk, mesg);
         nl_recvmsgs(sk, cb);
         nl_cb_put(cb);
         nlmsg_free(mesg);
@@ -200,14 +199,13 @@ int main(int argc, char** argv) {
         if (packet != NULL) {
             rtap = (struct ieee80211_radiotap_hdr *)packet;
             mlme = (struct ieee80211_mgmt *)(packet + le_to_host16(rtap->it_len));
-            
+
             uint16_t rt_freq = (uint16_t) packet[26] | (uint16_t) packet[27]<<8;
             if (rt_freq >= FIVE_START) {
                 rt_freq = 32 + ((rt_freq - FIVE_START) / 5);
             } else {
                 rt_freq = 1 + ((rt_freq - TWO_START) / 5);
             }
-            
 
             fc = le_to_host16(mlme->frame_control);
             type = (fc >> 2) & 0x0003;
@@ -226,10 +224,28 @@ int main(int argc, char** argv) {
                             seen_bssid = 1;
                         }
                 }
-                if (seen_bssid == 0 && mlme->tag_len > 0) {
+                if (seen_bssid == 0) {
+                    // start of tags
+                    uint16_t offset = le_to_host16(rtap->it_len) + sizeof(struct ieee80211_mgmt);
+
+                    // packet bigger than our caplen
+                    if (offset > hdr.caplen) {
+                        continue;
+                    }
+
                     char ssid[64];
                     memset(ssid, 0, 64);
-                    memcpy(ssid, packet + le_to_host16(rtap->it_len) + sizeof(struct ieee80211_mgmt), mlme->tag_len);
+                    while (offset < hdr.caplen) { 
+                        uint8_t tag_id = *(packet + offset++);
+                        uint8_t tag_len = *(packet + offset++);
+                        if (tag_id == 0) { // ESSID
+                            memcpy(ssid, packet + offset, tag_len);
+                        }
+                        if (tag_id == 3) { // Channel
+                            rt_freq = *(packet + offset);
+                        }
+                        offset += tag_len;
+                    }
                     printf("{\"essid\":\"%s\", \"bssid\":\"%s\", \"channel\":%d}\n", ssid, mac, rt_freq);
                     fflush(stdout);
                     // mark as seen
